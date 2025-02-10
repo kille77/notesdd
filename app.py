@@ -130,5 +130,8 @@ def handle_reorder_notes(new_notes):
     except Exception as e:
         print(f"Error reordering notes: {e}")
 
+# **Don't use `socketio.run()` in production!**
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    # For development, use socketio.run (DO NOT use in production)
+    # socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    pass
