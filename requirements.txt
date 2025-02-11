@@ -1,5 +1,10 @@
 Flask
 Flask-SocketIO
 eventlet
-gunicorn
+gevent
+gevent-websocket
+Flask-CORS
+flask_sqlalchemy
 python-dotenv
+gunicorn
+
