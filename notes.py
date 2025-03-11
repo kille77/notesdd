@@ -5,8 +5,6 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO, emit
 from werkzeug.utils import secure_filename
 from flask_migrate import Migrate
-from gevent import monkey
-monkey.patch_all()
 
 # Flask app initialization
 app = Flask(__name__)
@@ -28,7 +26,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # Initialize database, socket.io, and Flask-Migrate
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)  # Initialize Flask-Migrate
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Database Models
 class Page(db.Model):
@@ -240,8 +238,9 @@ def handle_delete_note(note_id):
     except Exception as e:
         print(f"Error deleting note: {e}")
 
-# Run the app (for production)
+# Run the app (only for development)
 if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", 5000))
-    socketio.run(app, host=host, port=port)
+    if os.getenv("FLASK_ENV") == "development":
+        socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    else:
+        app.run(host="0.0.0.0", port=5000)
