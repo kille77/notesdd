@@ -1,245 +1,195 @@
-import os
-import uuid
 from flask import Flask, render_template, request, jsonify, send_from_directory
-from flask_sqlalchemy import SQLAlchemy
-from flask_socketio import SocketIO, emit
-from werkzeug.utils import secure_filename
-from flask_migrate import Migrate
-
-# Flask app initialization
-app = Flask(__name__)
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "fallback_secret_key")
-
-# Database configuration
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///notes.db")
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
-# File upload configuration
-UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "uploads")
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif"}
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20MB limit
-
-# Ensure upload folder exists
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# Initialize database, socket.io, and Flask-Migrate
-db = SQLAlchemy(app)
-migrate = Migrate(app, db)  # Initialize Flask-Migrate
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
-
-# Database Models
-class Page(db.Model):
-    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    name = db.Column(db.String(100), nullable=False)  # Name of the page
-    notes = db.relationship("Note", backref="page", lazy=True)  # One-to-many relationship with notes
-
-class Note(db.Model):
-    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    text = db.Column(db.Text, nullable=False, default="New Note")
-    color = db.Column(db.String(20), default="#ffff00")
-    images = db.Column(db.Text, nullable=True)  # Store image paths as a comma-separated string
-    page_id = db.Column(db.String(36), db.ForeignKey("page.id"), nullable=False)  # Foreign key to associate with a page
-
-# Create database tables (this should only be needed when you first create the tables)
-with app.app_context():
-    db.create_all()
-
-# Utility function to check allowed file extensions
-def allowed_file(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-# Home route
-@app.route("/")
-def home():
-    return render_template("index.html")
-
-# API to create a new page
-@app.route("/api/pages", methods=["POST"])
-def create_page():
-    data = request.get_json()
-    page = Page(name=data.get("name"))
-    db.session.add(page)
-    db.session.commit()
-
-    # Emit a WebSocket event to all clients
-    socketio.emit("page_created", {"id": page.id, "name": page.name}, namespace="/")
-
-    return jsonify({"id": page.id, "name": page.name}), 201
-
-# API to get all pages
-@app.route("/api/pages", methods=["GET"])
-def get_pages():
-    pages = Page.query.all()
-    return jsonify([{"id": page.id, "name": page.name} for page in pages])
-
-# API to delete a page
-@app.route("/api/pages/<page_id>", methods=["DELETE"])
-def delete_page(page_id):
-    page = db.session.get(Page, page_id)
-    if not page:
-        return jsonify({"error": "Page not found"}), 404
-
-    # Delete associated notes and their images
-    for note in page.notes:
-        if note.images:
-            image_paths = note.images.split(',')
-            for image_path in image_paths:
-                filename = os.path.basename(image_path)
-                file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-        db.session.delete(note)
-
-    db.session.delete(page)
-    db.session.commit()
-
-    # Emit a WebSocket event to all clients
-    socketio.emit("page_deleted", {"id": page_id}, namespace="/")
-
-    return jsonify({"success": True})
-
-# API to get a specific note by ID
-@app.route("/api/notes/<note_id>", methods=["GET"])
-def get_note_by_id(note_id):
-    note = db.session.get(Note, note_id)  # Fetch the note by ID
-    if note:
-        return jsonify({
-            "id": note.id,
-            "text": note.text,
-            "color": note.color,
-            "images": note.images.split(',') if note.images else []  # Split the image paths into a list
-        })
-    else:
-        return jsonify({"error": "Note not found"}), 404
-    
-    # API to get a specific page by ID
-@app.route("/api/pages/<page_id>", methods=["GET"])
-def get_page_by_id(page_id):
-    page = db.session.get(Page, page_id)  # Fetch the page by ID
-    if page:
-        return jsonify({
-            "id": page.id,
-            "name": page.name
-        })
-    else:
-        return jsonify({"error": "Page not found"}), 404
-
-# API to get notes for a specific page
-@app.route("/api/pages/<page_id>/notes", methods=["GET"])
-def get_notes_for_page(page_id):
-    notes = Note.query.filter_by(page_id=page_id).all()
-    return jsonify([{
-        "id": note.id,
-        "text": note.text,
-        "color": note.color,
-        "images": note.images.split(',') if note.images else []
-    } for note in notes])
-
-# API to upload images
-@app.route("/upload-image", methods=["POST"])
-def upload_image():
-    if "images" not in request.files:
-        return jsonify({"success": False, "message": "No files uploaded"}), 400
-
-    files = request.files.getlist("images")
-    note_id = request.form.get("noteId")
-
-    # Get the note
-    note = db.session.get(Note, note_id)
-    if not note:
-        return jsonify({"success": False, "message": "Note not found"}), 404
-
-    # Allow unlimited images, just track them
-    existing_images = note.images.split(',') if note.images else []
-
-    # Validate files
-    filenames = []
-    for file in files:
-        if file.filename == "" or not allowed_file(file.filename):
-            return jsonify({"success": False, "message": "Invalid file type"}), 400
-
-        filename = secure_filename(f"{note_id}_{uuid.uuid4().hex}_{file.filename}")
-        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-        file.save(filepath)
-        filenames.append(f"/uploads/{filename}")
-
-    # Append new image paths to the existing list of images
-    if note.images:
-        note.images += "," + ",".join(filenames)
-    else:
-        note.images = ",".join(filenames)
-    
-    db.session.commit()
-
-    # Emit the updated notes for the specific page
-    socketio.emit("update_notes", {"page_id": note.page_id, "notes": get_notes_for_page(note.page_id).json}, namespace="/")
-
-    return jsonify({"success": True, "imagePaths": filenames})
-
-# Serve uploaded images
-@app.route("/uploads/<filename>")
-def uploaded_file(filename):
-    return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
-
-# WebSocket event handlers
-@socketio.on("add_note")
-def handle_add_note(data):
-    try:
-        page_id = data.get("page_id")
-        if not page_id:
-            return jsonify({"error": "Page ID is required"}), 400
-
-        note = Note(text=data.get("text", "New Note"), color=data.get("color", "#fff3cd"), page_id=page_id)
-        db.session.add(note)
-        db.session.commit()
-
-        # Emit the updated notes for the specific page
-        socketio.emit("update_notes", {"page_id": page_id, "notes": get_notes_for_page(page_id).json}, namespace="/")
-    except Exception as e:
-        print(f"Error adding note: {e}")
-
-@socketio.on("update_note")
-def handle_update_note(data):
-    try:
-        note = db.session.get(Note, data.get("id"))
-        if note:
-            note.text = data["note"].get("text", note.text)
-            note.color = data["note"].get("color", note.color)
-            db.session.commit()
-
-            # Emit the updated notes for the specific page
-            socketio.emit("update_notes", {"page_id": note.page_id, "notes": get_notes_for_page(note.page_id).json}, namespace="/")
-    except Exception as e:
-        print(f"Error updating note: {e}")
-
-@socketio.on("delete_note")
-def handle_delete_note(note_id):
-    try:
-        note = db.session.get(Note, note_id)
-        if note:
-            # Delete associated images
-            if note.images:
-                image_paths = note.images.split(',')
-                for image_path in image_paths:
-                    filename = os.path.basename(image_path)
-                    file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-
-            page_id = note.page_id  # Store the page_id before deleting the note
-            db.session.delete(note)
-            db.session.commit()
-
-            # Emit the updated notes for the specific page
-            socketio.emit("update_notes", {"page_id": page_id, "notes": get_notes_for_page(page_id).json}, namespace="/")
-        else:
-            print(f"Note with ID {note_id} not found.")
-    except Exception as e:
-        print(f"Error deleting note: {e}")
-
-# Run the app (for production)
-if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", 5000))
-    socketio.run(app, host=host, port=port)
+ from flask_socketio import SocketIO, emit
+ import os
+ import sqlite3
+ import json
+ import uuid
+ 
+ # Get the directory where the script is located
+ @@ -15,67 +15,35 @@
+ # Ensure the uploads folder exists
+ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+ 
+ # Database setup
+ DB_FILE = os.path.join(BASE_DIR, "notes.db")
+ 
+ def get_db_connection():
+     conn = sqlite3.connect(DB_FILE)
+     conn.row_factory = sqlite3.Row  # Allows access by column name
+     return conn
+ 
+ # Create notes table
+ def init_db():
+     with get_db_connection() as conn:
+         conn.execute("""
+             CREATE TABLE IF NOT EXISTS notes (
+                 id TEXT PRIMARY KEY,
+                 text TEXT NOT NULL,
+                 color TEXT DEFAULT '#fff3cd',
+                 image TEXT DEFAULT NULL
+             )
+         """)
+         conn.commit()
+ 
+ init_db()  # Ensure database is initialized
+ 
+ # Load notes from database
+ # File to store notes (in the same directory as the script)
+ NOTES_FILE = os.path.join(BASE_DIR, "notes.json")
+ 
+ # Ensure all notes have an ID
+ def ensure_note_ids(notes):
+     for note in notes:
+         if "id" not in note:
+             note["id"] = str(uuid.uuid4())  # Generate a unique ID
+     return notes
+ 
+ # Load notes from file
+ def load_notes():
+     try:
+         with get_db_connection() as conn:
+             notes = conn.execute("SELECT * FROM notes").fetchall()
+             return [dict(note) for note in notes]
+         if os.path.exists(NOTES_FILE):
+             with open(NOTES_FILE, "r") as file:
+                 notes = json.load(file)
+                 return ensure_note_ids(notes)
+         return []
+     except Exception as e:
+         print(f"Error loading notes: {e}")
+         return []
+ 
+ # Save a new note to database
+ def save_note(note):
+     try:
+         with get_db_connection() as conn:
+             conn.execute("INSERT INTO notes (id, text, color, image) VALUES (?, ?, ?, ?)",
+                          (note["id"], note["text"], note["color"], note.get("image")))
+             conn.commit()
+     except Exception as e:
+         print(f"Error saving note: {e}")
+ 
+ # Update a note in the database
+ def update_note(note_id, updated_note):
+     try:
+         with get_db_connection() as conn:
+             conn.execute("UPDATE notes SET text = ?, color = ?, image = ? WHERE id = ?",
+                          (updated_note.get("text"), updated_note.get("color"), updated_note.get("image"), note_id))
+             conn.commit()
+     except Exception as e:
+         print(f"Error updating note: {e}")
+ 
+ # Delete a note from database
+ def delete_note(note_id):
+ # Save notes to file
+ def save_notes(notes):
+     try:
+         with get_db_connection() as conn:
+             conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+             conn.commit()
+         with open(NOTES_FILE, "w") as file:
+             json.dump(notes, file)
+     except Exception as e:
+         print(f"Error deleting note: {e}")
+         print(f"Error saving notes: {e}")
+ 
+ # Home route
+ @app.route("/")
+ @@ -88,7 +56,7 @@ def get_notes():
+     notes = load_notes()
+     return jsonify(notes)
+ 
+ # Image upload route
+ # Route to handle image uploads
+ @app.route("/upload-image", methods=["POST"])
+ def upload_image():
+     try:
+ @@ -101,21 +69,13 @@ def upload_image():
+         if file.filename == "":
+             return jsonify({"success": False, "message": "No file selected"}), 400
+ 
+         # Validate file type
+         allowed_extensions = {".jpg", ".jpeg", ".png", ".gif"}
+         ext = os.path.splitext(file.filename)[1].lower()
+         if ext not in allowed_extensions:
+             return jsonify({"success": False, "message": "Invalid file type"}), 400
+ 
+         # Save the file with a unique name
+         filename = f"{note_id}_{uuid.uuid4().hex}{ext}"
+         # Save the file
+         filename = f"{note_id}_{file.filename}"
+         filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+         file.save(filepath)
+ 
+         # Update the note with image path
+         # Return the file path
+         image_path = f"/uploads/{filename}"
+         update_note(note_id, {"image": image_path})
+ 
+         return jsonify({"success": True, "imagePath": image_path})
+     except Exception as e:
+         print(f"Error uploading image: {e}")
+ @@ -130,32 +90,48 @@ def uploaded_file(filename):
+ @socketio.on("add_note")
+ def handle_add_note(data):
+     try:
+         note = {"id": str(uuid.uuid4()), **data}
+         save_note(note)
+         emit("update_notes", load_notes(), broadcast=True)
+         print("Received new note data:", data)  # Debugging
+         notes = load_notes()
+         note = {"id": str(uuid.uuid4()), **data}  # Ensure a unique ID
+         notes.append(note)
+         save_notes(notes)
+         emit("update_notes", notes, broadcast=True)
+     except Exception as e:
+         emit("error", {"message": "Could not save note", "error": str(e)})
+         print(f"Error adding note: {e}")
+ 
+ # WebSocket event for updating a note
+ @socketio.on("update_note")
+ def handle_update_note(data):
+     try:
+         note_id = data.get("id")
+         updated_note = data.get("note")
+         update_note(note_id, updated_note)
+         emit("update_notes", load_notes(), broadcast=True)
+     except Exception as e:
+         emit("error", {"message": "Could not update note", "error": str(e)})
+     notes = load_notes()
+     note_id = data.get("id")
+     updated_note = data.get("note")
+ 
+     for i, note in enumerate(notes):
+         if "id" in note and note["id"] == note_id:
+             notes[i] = {**note, **updated_note}
+             save_notes(notes)
+             emit("update_notes", notes, broadcast=True)
+             break
+ 
+ # WebSocket event for deleting a note
+ @socketio.on("delete_note")
+ def handle_delete_note(note_id):
+     notes = load_notes()
+     notes = [note for note in notes if "id" in note and note["id"] != note_id]
+     save_notes(notes)
+     emit("update_notes", notes, broadcast=True)
+ 
+ # WebSocket event for reordering notes
+ @socketio.on("reorder_notes")
+ def handle_reorder_notes(new_notes):
+     try:
+         delete_note(note_id)
+         emit("update_notes", load_notes(), broadcast=True)
+         save_notes(new_notes)
+         emit("update_notes", new_notes, broadcast=True)
+     except Exception as e:
+         emit("error", {"message": "Could not delete note", "error": str(e)})
+         print(f"Error reordering notes: {e}")
+ 
+ # **Don't use `socketio.run()` in production!**
+ if __name__ == "__main__":
+     socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+     # For development, use socketio.run (DO NOT use in production)
+     # socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+     pass
