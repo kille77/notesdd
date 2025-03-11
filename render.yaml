@@ -3,7 +3,7 @@ services:
     name: stickynotes
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn -k eventlet -w 1 -b 0.0.0.0:5000 notes:app"
+    startCommand: "gunicorn -k gevent -w 1 -b 0.0.0.0:5000 notes:app"
     envVars:
       - key: FLASK_ENV
         value: production
