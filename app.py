@@ -5,8 +5,8 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO, emit
 from werkzeug.utils import secure_filename
 from flask_migrate import Migrate
-from gevent import monkey
-monkey.patch_all()
+import eventlet
+eventlet.monkey_patch()
 
 # Flask app initialization
 app = Flask(__name__)
@@ -28,7 +28,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # Initialize database, socket.io, and Flask-Migrate
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)  # Initialize Flask-Migrate
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # Database Models
 class Page(db.Model):
